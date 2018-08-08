@@ -26,12 +26,14 @@ def load_calls(filename):
         calls[key] = record
     return calls
 
+
+# convert a pysam record into a pair of aligned strings like so:
+#  s1: AGTACTA-GTATAC
+#  s2: AGTG-TAGGTATAC
 def make_aligned_strings(read, reference_file):
 
     qseq = read.query_alignment_sequence
     rseq = reference_file.fetch(read.reference_name, read.reference_start, read.reference_end)
-
-    sys.stderr.write("alignment length: " + str(read.reference_end - read.reference_start) + "\n")
 
     qseq_a_list = list()
     rseq_a_list = list()
@@ -123,9 +125,6 @@ def process_alignment(fp, read, query_aligned, ref_aligned):
         query_position = sequence_length - query_end_position
         query_aligned = rev_comp_aligned(query_aligned)
         ref_aligned = rev_comp_aligned(ref_aligned)
-    #print "QP: %d (after strand)" % (query_position)
-
-    #print_alignment(read, query_aligned, ref_aligned)
 
     i = 0
     n = len(ref_aligned)
@@ -138,14 +137,14 @@ def process_alignment(fp, read, query_aligned, ref_aligned):
         else:
 
             # new difference found, find the next matching base
-            is_reference_gap = False
+            is_reference_n = False
             j = i
             while query_aligned[j] != ref_aligned[j] and j < n:
-                is_reference_gap = is_reference_gap or ref_aligned[j] == 'N'
+                is_reference_n = is_reference_n or ref_aligned[j] == 'N'
                 j += 1
 
             # skip differences at reference gaps
-            if is_reference_gap:
+            if is_reference_n:
                 i = j
                 continue
 
@@ -171,7 +170,8 @@ def process_alignment(fp, read, query_aligned, ref_aligned):
                 r_sub = ref_aligned[i-1] + r_sub.replace("-", "")
                 offset = 1
             
-            fp.write("%s\t%d\t.\t%s\t%s\t.\tPASS\t.\tref_position=%s:%d\n" % (read.query_name, query_position - offset + 1, q_sub.upper(), r_sub.upper(), read.reference_name, reference_position))
+            if fp is not None:
+                fp.write("%s\t%d\t.\t%s\t%s\t.\tPASS\t.\n" % (read.query_name, query_position - offset + 1, q_sub.upper(), r_sub.upper()))
             reference_position += (j - i - r_gaps)
             query_position += (j - i - q_gaps)
             i = j
@@ -189,18 +189,10 @@ out_bam = "assembly_analysis.sorted.bam"
 os.system("minimap2 -Y -a -x asm5 %s %s | samtools sort -T assembly_analysis.tmp -o %s -" % (args.reference, args.assembly, out_bam))
 os.system("samtools index %s" % (out_bam))
 
-# Calculate variants with htsbox
-out_vcf = "assembly_analysis.vcf"
-os.system("htsbox pileup -c -V0.0001 -S300 -q10 -Q1 -s1 -f %s %s > %s" % (args.reference, out_bam, out_vcf))
-
 # Read variants VCF to ignore as errors
 variants = dict()
 if args.variants is not None:
     variants = load_calls(args.variants)
-
-# Read differences with respect to the reference
-#candidate_errors = load_calls(out_vcf)
-candidate_errors = dict()
 
 # Open reference file
 reference_file = pysam.FastaFile(args.reference)
