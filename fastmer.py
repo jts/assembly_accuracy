@@ -97,7 +97,9 @@ def rev_comp_aligned(s):
     trans = maketrans("ACGT-", "TGCA-")
     return s.translate(trans)[::-1]
 
-def print_edits(fp, read, query_aligned, ref_aligned):
+def process_alignment(fp, read, query_aligned, ref_aligned):
+    global matches, mismatches, insertions, deletions, error_blocks
+    
     reference_position = read.reference_start
     hard_clip_tag = 5
     query_pre_hard_clip = 0
@@ -114,9 +116,6 @@ def print_edits(fp, read, query_aligned, ref_aligned):
     #
     query_start_position = read.query_alignment_start + query_pre_hard_clip
     query_end_position = read.query_alignment_end + query_pre_hard_clip
-
-    #print "PREHC: %d POSTHC: %d QS: %d QE: %d QL: %d RS: %d RE: %d" % (query_pre_hard_clip, query_post_hard_clip, query_start_position, query_end_position, sequence_length, read.reference_start, read.reference_end)
-
     query_position = query_start_position
 
     # switch strands if rc
@@ -135,11 +134,28 @@ def print_edits(fp, read, query_aligned, ref_aligned):
             reference_position += 1
             query_position += 1
             i += 1
+            matches += 1
         else:
-            # new difference found, find next matching base
+
+            # new difference found, find the next matching base
+            is_reference_gap = False
             j = i
             while query_aligned[j] != ref_aligned[j] and j < n:
+                is_reference_gap = is_reference_gap or ref_aligned[j] == 'N'
                 j += 1
+
+            # skip differences at reference gaps
+            if is_reference_gap:
+                i = j
+                continue
+
+            # count the error type
+            error_blocks += 1
+            for idx in range(i, j):
+                assert(not (query_aligned[idx] == '-' and ref_aligned[idx] == '-'))
+                mismatches += query_aligned[idx] != '-' and ref_aligned[idx] != '-'
+                insertions += ref_aligned[idx] == '-'
+                deletions += query_aligned[idx] == '-'
 
             # Get difference strings
             q_sub = query_aligned[i:j]
@@ -155,7 +171,7 @@ def print_edits(fp, read, query_aligned, ref_aligned):
                 r_sub = ref_aligned[i-1] + r_sub.replace("-", "")
                 offset = 1
             
-            fp.write("%s\t%d\t.\t%s\t%s\t.\tPASS\t.\n" % (read.query_name, query_position - offset + 1, q_sub.upper(), r_sub.upper()))
+            fp.write("%s\t%d\t.\t%s\t%s\t.\tPASS\t.\tref_position=%s:%d\n" % (read.query_name, query_position - offset + 1, q_sub.upper(), r_sub.upper(), read.reference_name, reference_position))
             reference_position += (j - i - r_gaps)
             query_position += (j - i - q_gaps)
             i = j
@@ -183,7 +199,8 @@ if args.variants is not None:
     variants = load_calls(args.variants)
 
 # Read differences with respect to the reference
-candidate_errors = load_calls(out_vcf)
+#candidate_errors = load_calls(out_vcf)
+candidate_errors = dict()
 
 # Open reference file
 reference_file = pysam.FastaFile(args.reference)
@@ -212,38 +229,12 @@ for read in samfile:
 
         if args.print_alignment:
             print_alignment(read, query_aligned, ref_aligned)
-
-        if edits_fp is not None:
-            print_edits(edits_fp, read, query_aligned, ref_aligned)
-
-        for i in range(0, len(query_aligned)):
-            if query_aligned[i] == ref_aligned[i]:
-                matches += 1
+        
+        # accumulate stats for this aligned segment
+        process_alignment(edits_fp, read, query_aligned, ref_aligned)
 
     except ValueError as inst:
         pass
-
-vcf_reader = vcf.Reader(out_vcf)
-vcf_writer = vcf.Writer(open("assembly_analysis.errors.vcf", 'w'), vcf_reader)
-
-for key in candidate_errors:
-    if key in variants:
-        continue # not an error
-   
-    error = candidate_errors[key]
-    if error.is_snp:
-        mismatches += len(error.REF)
-    if error.is_indel:
-        ref_len = len(error.REF)
-        alt_len = len(error.ALT[0])
-        if alt_len > ref_len:
-            insertions += alt_len - 1
-        elif ref_len > alt_len:
-            deletions += ref_len - 1
-        else:
-            mismatches += alt_len # mnp?
-    error_blocks += 1
-    vcf_writer.write_record(error)
 
 alignment_length = (matches + mismatches + insertions + deletions)
 identity = float(matches) / alignment_length
