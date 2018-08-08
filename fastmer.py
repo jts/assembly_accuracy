@@ -6,7 +6,9 @@ import argparse
 import vcf
 import math
 import sys
+import subprocess
 from string import maketrans
+from collections import namedtuple
 
 def qscore(p):
     return -10 * math.log10(1 - p)
@@ -99,8 +101,7 @@ def rev_comp_aligned(s):
     trans = maketrans("ACGT-", "TGCA-")
     return s.translate(trans)[::-1]
 
-def process_alignment(fp, read, query_aligned, ref_aligned):
-    global matches, mismatches, insertions, deletions, error_blocks
+def process_alignment(fp, read, query_aligned, ref_aligned, alignment_stats):
     
     reference_position = read.reference_start
     hard_clip_tag = 5
@@ -133,7 +134,7 @@ def process_alignment(fp, read, query_aligned, ref_aligned):
             reference_position += 1
             query_position += 1
             i += 1
-            matches += 1
+            alignment_stats.matches += 1
         else:
 
             # new difference found, find the next matching base
@@ -149,12 +150,12 @@ def process_alignment(fp, read, query_aligned, ref_aligned):
                 continue
 
             # count the error type
-            error_blocks += 1
+            alignment_stats.variants += 1
             for idx in range(i, j):
                 assert(not (query_aligned[idx] == '-' and ref_aligned[idx] == '-'))
-                mismatches += query_aligned[idx] != '-' and ref_aligned[idx] != '-'
-                insertions += ref_aligned[idx] == '-'
-                deletions += query_aligned[idx] == '-'
+                alignment_stats.mismatches += query_aligned[idx] != '-' and ref_aligned[idx] != '-'
+                alignment_stats.insertions += ref_aligned[idx] == '-'
+                alignment_stats.deletions += query_aligned[idx] == '-'
 
             # Get difference strings
             q_sub = query_aligned[i:j]
@@ -186,8 +187,12 @@ parser.add_argument('--write-edits', type=str, required=False)
 args = parser.parse_args()
 
 out_bam = "assembly_analysis.sorted.bam"
-os.system("minimap2 -Y -a -x asm5 %s %s | samtools sort -T assembly_analysis.tmp -o %s -" % (args.reference, args.assembly, out_bam))
-os.system("samtools index %s" % (out_bam))
+with open(os.devnull, 'wb') as devnull:
+    mm2_cmd = "minimap2 -Y -a -x asm5 %s %s | samtools sort -T assembly_analysis.tmp -o %s -" % (args.reference, args.assembly, out_bam)
+    subprocess.check_call(mm2_cmd, stdout=devnull, stderr=devnull, shell=True)
+
+    index_cmd = "samtools index %s" % (out_bam)
+    subprocess.check_call(index_cmd, stdout=devnull, stderr=devnull, shell=True)
 
 # Read variants VCF to ignore as errors
 variants = dict()
@@ -197,12 +202,13 @@ if args.variants is not None:
 # Open reference file
 reference_file = pysam.FastaFile(args.reference)
 
-# counters
-matches = 0
-mismatches = 0
-insertions = 0
-deletions = 0
-error_blocks = 0
+# alignment stats
+alignment_stats = namedtuple('AlignmentStats', ['matches', 'mismatches', 'insertions', 'deletions', 'variants'])
+alignment_stats.matches = 0
+alignment_stats.mismatches = 0
+alignment_stats.insertions = 0
+alignment_stats.deletions = 0
+alignment_stats.variants = 0
 
 edits_fp = None
 if args.write_edits is not None:
@@ -223,13 +229,17 @@ for read in samfile:
             print_alignment(read, query_aligned, ref_aligned)
         
         # accumulate stats for this aligned segment
-        process_alignment(edits_fp, read, query_aligned, ref_aligned)
+        process_alignment(edits_fp, read, query_aligned, ref_aligned, alignment_stats)
 
     except ValueError as inst:
         pass
 
-alignment_length = (matches + mismatches + insertions + deletions)
-identity = float(matches) / alignment_length
-error_block_rate = 1 - (float(error_blocks) / alignment_length)
+alignment_length = (alignment_stats.matches + alignment_stats.mismatches + alignment_stats.insertions + alignment_stats.deletions)
+identity = float(alignment_stats.matches) / alignment_length
 
-print "%s percent identity: %.4f (Q%.1f) [matches=%d mismatches=%d insertions=%d deletions=%d] variant rate: %.4lf (Q%.1f)" % (args.assembly, 100 * identity, qscore(identity), matches, mismatches, insertions, deletions, 100*error_block_rate, qscore(error_block_rate))
+print "\t".join(["assembly_name", "percent_identity", "qscore", "num_matches", "num_mismatches", "num_insertions", "num_deletions"])
+print "\t".join([str(x) for x in [args.assembly, 100 * identity, qscore(identity), alignment_stats.matches, alignment_stats.mismatches, alignment_stats.insertions, alignment_stats.deletions]])
+
+# clean up temporary files
+os.remove(out_bam)
+os.remove(out_bam + ".bai")
