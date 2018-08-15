@@ -9,6 +9,7 @@ import sys
 import subprocess
 from string import maketrans
 from collections import namedtuple
+from collections import defaultdict
 
 def qscore(p):
     return -10 * math.log10(1 - p)
@@ -101,7 +102,7 @@ def rev_comp_aligned(s):
     trans = maketrans("ACGT-", "TGCA-")
     return s.translate(trans)[::-1]
 
-def process_alignment(fp, read, query_aligned, ref_aligned, alignment_stats):
+def gather_basic_stats(fp, read, query_aligned, ref_aligned, alignment_stats):
     
     reference_position = read.reference_start
     hard_clip_tag = 5
@@ -173,15 +174,37 @@ def process_alignment(fp, read, query_aligned, ref_aligned, alignment_stats):
             
             if fp is not None:
                 fp.write("%s\t%d\t.\t%s\t%s\t.\tPASS\t.\n" % (read.query_name, query_position - offset + 1, q_sub.upper(), r_sub.upper()))
+
+            # update counters
             reference_position += (j - i - r_gaps)
             query_position += (j - i - q_gaps)
             i = j
 
+def gather_homopolymer_stats(query_aligned, ref_aligned, alignment_stats):
+    curr_hp_start = 0
+    curr_hp_base = 'N'
+    n = len(ref_aligned)
+    for i in range(0, n):
+        if ref_aligned[i] != '-' and ref_aligned[i] != curr_hp_base:
+            # end current HP, possibly update stats
+            hp_length = i - curr_hp_start
+            if hp_length >= args.min_hp_length and hp_length <= args.max_hp_length:
+                query_sub = query_aligned[curr_hp_start:i]
+                ref_sub = ref_aligned[curr_hp_start:i]
+                
+                alignment_stats.hp_count[hp_length] += 1
+                alignment_stats.hp_correct[hp_length] += (query_sub == ref_sub)
+
+            curr_hp_start = i
+            curr_hp_base = ref_aligned[i] 
+            
 parser = argparse.ArgumentParser( description='Calculate the accuracy of a genome assembly by comparing to a reference')
 parser.add_argument('--reference', type=str, required=True)
 parser.add_argument('--assembly', type=str, required=True)
 parser.add_argument('--variants', type=str, required=False)
 parser.add_argument('--min-mapping-quality', type=int, required=False, default=0)
+parser.add_argument('--min-hp-length', type=int, required=False, default=4)
+parser.add_argument('--max-hp-length', type=int, required=False, default=9)
 parser.add_argument('--print-alignment', action='store_true')
 parser.add_argument('--write-edits', type=str, required=False)
 args = parser.parse_args()
@@ -209,6 +232,8 @@ alignment_stats.mismatches = 0
 alignment_stats.insertions = 0
 alignment_stats.deletions = 0
 alignment_stats.variants = 0
+alignment_stats.hp_count = defaultdict(int)
+alignment_stats.hp_correct = defaultdict(int)
 
 edits_fp = None
 if args.write_edits is not None:
@@ -229,7 +254,8 @@ for read in samfile:
             print_alignment(read, query_aligned, ref_aligned)
         
         # accumulate stats for this aligned segment
-        process_alignment(edits_fp, read, query_aligned, ref_aligned, alignment_stats)
+        gather_basic_stats(edits_fp, read, query_aligned, ref_aligned, alignment_stats)
+        gather_homopolymer_stats(query_aligned, ref_aligned, alignment_stats)
 
     except ValueError as inst:
         pass
@@ -237,8 +263,16 @@ for read in samfile:
 alignment_length = (alignment_stats.matches + alignment_stats.mismatches + alignment_stats.insertions + alignment_stats.deletions)
 identity = float(alignment_stats.matches) / alignment_length
 
-print "\t".join(["assembly_name", "percent_identity", "qscore", "num_matches", "num_mismatches", "num_insertions", "num_deletions"])
-print "\t".join([str(x) for x in [args.assembly, 100 * identity, qscore(identity), alignment_stats.matches, alignment_stats.mismatches, alignment_stats.insertions, alignment_stats.deletions]])
+# build header and output stats
+header = ["assembly_name", "percent_identity", "qscore", "num_matches", "num_mismatches", "num_insertions", "num_deletions"]
+stats = [args.assembly, "%.6f" % (100 * identity), "%.2f" % qscore(identity), alignment_stats.matches, alignment_stats.mismatches, alignment_stats.insertions, alignment_stats.deletions]
+
+for i in range(args.min_hp_length, args.max_hp_length + 1):
+    header.append("%dmer_acc" % (i))
+    stats.append("%.3f" % (float(alignment_stats.hp_correct[i]) / alignment_stats.hp_count[i]))
+
+print "\t".join(header)
+print "\t".join([str(x) for x in stats])
 
 # clean up temporary files
 os.remove(out_bam)
