@@ -7,12 +7,95 @@ import vcf
 import math
 import sys
 import subprocess
+import numpy as np
 from string import maketrans
 from collections import namedtuple
 from collections import defaultdict
 
+# class to summarize a pairwise alignment between two sequences
+# like a genome assembly to a reference genome
+class AlignmentStats():
+    
+    def __init__(self):
+        self.matches = 0
+        self.mismatches = 0
+        self.insertions = 0
+        self.deletions = 0
+        self.hp_count = defaultdict(int)
+        self.hp_correct = defaultdict(int)
+
+    def add_match(self):
+        self.matches += 1
+    
+    def add_mismatch(self):
+        self.mismatches += 1
+    
+    def add_insertion(self):
+        self.insertions += 1
+
+    def add_deletion(self):
+        self.deletions += 1
+
+    def get_identity(self):
+        alignment_length = self.matches + self.mismatches + self.insertions + self.deletions
+        return float(self.matches) / alignment_length
+
+class AssemblyAccuracy():
+    
+    def __init__(self):
+        self.window_size = 100000
+        self.stats_by_window = defaultdict(AlignmentStats)
+        self.global_stats = AlignmentStats()
+
+    def add_match(self, position):
+        self.global_stats.add_match()
+        self.stats_by_window[self.get_bin(position)].add_match()
+    
+    def add_mismatch(self, position):
+        self.global_stats.add_mismatch()
+        self.stats_by_window[self.get_bin(position)].add_mismatch()
+    
+    def add_insertion(self, position):
+        self.global_stats.add_insertion()
+        self.stats_by_window[self.get_bin(position)].add_insertion()
+
+    def add_deletion(self, position):
+        self.global_stats.add_deletion()
+        self.stats_by_window[self.get_bin(position)].add_deletion()
+
+    def get_matches(self):
+        return self.global_stats.matches
+
+    def get_mismatches(self):
+        return self.global_stats.mismatches
+    
+    def get_insertions(self):
+        return self.global_stats.insertions
+
+    def get_deletions(self):
+        return self.global_stats.deletions
+
+    def get_homopolymer_accuracy(self, length):
+        return float(self.global_stats.hp_correct[length]) / self.global_stats.hp_count[length]
+
+    def get_identity(self):
+        return self.global_stats.get_identity()
+
+    def get_segment_identities(self):
+        return [x.get_identity() for x in self.stats_by_window.values()]
+
+    def get_median_segment_identity(self):
+        return np.median(self.get_segment_identities())
+
+    def get_bin(self, position):
+        return int(position / self.window_size)
+
 def qscore(p):
-    return -10 * math.log10(1 - p)
+
+    if p < 1:
+        return -10 * math.log10(1 - p)
+    else:
+        return 90
 
 def var2key(var):
     return var.CHROM + ":" + str(var.POS) + ":" + var.REF + ">" + str(var.ALT[0])
@@ -102,7 +185,7 @@ def rev_comp_aligned(s):
     trans = maketrans("ACGT-", "TGCA-")
     return s.translate(trans)[::-1]
 
-def gather_basic_stats(fp, read, query_aligned, ref_aligned, alignment_stats):
+def gather_basic_stats(fp, read, query_aligned, ref_aligned, assembly_accuracy):
     
     reference_position = read.reference_start
     hard_clip_tag = 5
@@ -135,7 +218,8 @@ def gather_basic_stats(fp, read, query_aligned, ref_aligned, alignment_stats):
             reference_position += 1
             query_position += 1
             i += 1
-            alignment_stats.matches += 1
+            assembly_accuracy.add_match(reference_position)
+
         else:
 
             # new difference found, find the next matching base
@@ -151,12 +235,16 @@ def gather_basic_stats(fp, read, query_aligned, ref_aligned, alignment_stats):
                 continue
 
             # count the error type
-            alignment_stats.variants += 1
             for idx in range(i, j):
                 assert(not (query_aligned[idx] == '-' and ref_aligned[idx] == '-'))
-                alignment_stats.mismatches += query_aligned[idx] != '-' and ref_aligned[idx] != '-'
-                alignment_stats.insertions += ref_aligned[idx] == '-'
-                alignment_stats.deletions += query_aligned[idx] == '-'
+                if query_aligned[idx] != '-' and ref_aligned[idx] != '-':
+                    assembly_accuracy.add_mismatch(reference_position)
+
+                if ref_aligned[idx] == '-':
+                    assembly_accuracy.add_insertion(reference_position)
+
+                if query_aligned[idx] == '-':
+                    assembly_accuracy.add_deletion(reference_position)
 
             # Get difference strings
             q_sub = query_aligned[i:j]
@@ -180,7 +268,7 @@ def gather_basic_stats(fp, read, query_aligned, ref_aligned, alignment_stats):
             query_position += (j - i - q_gaps)
             i = j
 
-def gather_homopolymer_stats(query_aligned, ref_aligned, alignment_stats):
+def gather_homopolymer_stats(query_aligned, ref_aligned, assembly_accuracy):
     curr_hp_start = 0
     curr_hp_base = 'N'
     n = len(ref_aligned)
@@ -192,8 +280,8 @@ def gather_homopolymer_stats(query_aligned, ref_aligned, alignment_stats):
                 query_sub = query_aligned[curr_hp_start:i]
                 ref_sub = ref_aligned[curr_hp_start:i]
                 
-                alignment_stats.hp_count[hp_length] += 1
-                alignment_stats.hp_correct[hp_length] += (query_sub == ref_sub)
+                assembly_accuracy.global_stats.hp_count[hp_length] += 1
+                assembly_accuracy.global_stats.hp_correct[hp_length] += (query_sub == ref_sub)
 
             curr_hp_start = i
             curr_hp_base = ref_aligned[i] 
@@ -206,6 +294,7 @@ parser.add_argument('--min-mapping-quality', type=int, required=False, default=0
 parser.add_argument('--min-hp-length', type=int, required=False, default=4)
 parser.add_argument('--max-hp-length', type=int, required=False, default=9)
 parser.add_argument('--print-alignment', action='store_true')
+parser.add_argument('--print-identity-per-segment', action='store_true')
 parser.add_argument('--write-edits', type=str, required=False)
 args = parser.parse_args()
 
@@ -225,15 +314,8 @@ if args.variants is not None:
 # Open reference file
 reference_file = pysam.FastaFile(args.reference)
 
-# alignment stats
-alignment_stats = namedtuple('AlignmentStats', ['matches', 'mismatches', 'insertions', 'deletions', 'variants'])
-alignment_stats.matches = 0
-alignment_stats.mismatches = 0
-alignment_stats.insertions = 0
-alignment_stats.deletions = 0
-alignment_stats.variants = 0
-alignment_stats.hp_count = defaultdict(int)
-alignment_stats.hp_correct = defaultdict(int)
+# accuracy calculator
+assembly_accuracy = AssemblyAccuracy()
 
 edits_fp = None
 if args.write_edits is not None:
@@ -254,25 +336,36 @@ for read in samfile:
             print_alignment(read, query_aligned, ref_aligned)
         
         # accumulate stats for this aligned segment
-        gather_basic_stats(edits_fp, read, query_aligned, ref_aligned, alignment_stats)
-        gather_homopolymer_stats(query_aligned, ref_aligned, alignment_stats)
+        gather_basic_stats(edits_fp, read, query_aligned, ref_aligned, assembly_accuracy)
+        gather_homopolymer_stats(query_aligned, ref_aligned, assembly_accuracy)
 
     except ValueError as inst:
         pass
 
-alignment_length = (alignment_stats.matches + alignment_stats.mismatches + alignment_stats.insertions + alignment_stats.deletions)
-identity = float(alignment_stats.matches) / alignment_length
+if args.print_identity_per_segment:
+    si = assembly_accuracy.get_segment_identities()
+    print("index\tqscore")
+    for idx, identity in enumerate(si):
+        print("%d\t%.2f" % (idx, qscore(identity)))
 
-# build header and output stats
-header = ["assembly_name", "percent_identity", "qscore", "num_matches", "num_mismatches", "num_insertions", "num_deletions"]
-stats = [args.assembly, "%.6f" % (100 * identity), "%.2f" % qscore(identity), alignment_stats.matches, alignment_stats.mismatches, alignment_stats.insertions, alignment_stats.deletions]
+else:
+    identity = assembly_accuracy.get_identity()
+    median_identity = assembly_accuracy.get_median_segment_identity()
 
-for i in range(args.min_hp_length, args.max_hp_length + 1):
-    header.append("%dmer_acc" % (i))
-    stats.append("%.3f" % (float(alignment_stats.hp_correct[i]) / alignment_stats.hp_count[i]))
+    # build header and output stats
+    header = ["assembly_name", "percent_identity", "qscore", "segment_median_qscore", "num_matches", "num_mismatches", "num_insertions", "num_deletions"]
+    stats = [args.assembly, "%.6f" % (100 * identity), "%.2f" % qscore(identity), qscore(median_identity),
+                                                                                  assembly_accuracy.get_matches(), 
+                                                                                  assembly_accuracy.get_mismatches(), 
+                                                                                  assembly_accuracy.get_insertions(),
+                                                                                  assembly_accuracy.get_deletions()]
 
-print "\t".join(header)
-print "\t".join([str(x) for x in stats])
+    for i in range(args.min_hp_length, args.max_hp_length + 1):
+        header.append("%dmer_acc" % (i))
+        stats.append("%.3f" % (assembly_accuracy.get_homopolymer_accuracy(i)))
+
+    print "\t".join(header)
+    print "\t".join([str(x) for x in stats])
 
 # clean up temporary files
 os.remove(out_bam)
