@@ -8,7 +8,6 @@ import math
 import sys
 import subprocess
 import numpy as np
-from string import maketrans
 from collections import namedtuple
 from collections import defaultdict
 
@@ -173,16 +172,16 @@ def make_aligned_strings(read, reference_file):
 
 def print_alignment(read, query_aligned, ref_aligned):
     reference_position = read.reference_start
-    print "Alignment for %s:%s" % (read.reference_name, reference_position)
+    print("Alignment for %s:%s" % (read.reference_name, reference_position))
 
     for i in range(0, len(query_aligned), 80):
-        print "QUERY    " + query_aligned[i:i+80]
-        print "REF      " + ref_aligned[i:i+80] + " " + str(reference_position)
-        print ""
+        print("QUERY    " + query_aligned[i:i+80])
+        print("REF      " + ref_aligned[i:i+80] + " " + str(reference_position))
+        print("")
         reference_position += len(ref_aligned[i:i+80].replace('-', ''))
 
 def rev_comp_aligned(s):
-    trans = maketrans("ACGT-", "TGCA-")
+    trans = str.maketrans("ACGT-", "TGCA-")
     return s.translate(trans)[::-1]
 
 def gather_basic_stats(fp, read, query_aligned, ref_aligned, assembly_accuracy):
@@ -291,6 +290,7 @@ parser.add_argument('--reference', type=str, required=True)
 parser.add_argument('--assembly', type=str, required=True)
 parser.add_argument('--variants', type=str, required=False)
 parser.add_argument('--min-mapping-quality', type=int, required=False, default=0)
+parser.add_argument('--min-alignment-length', type=int, required=False, default=50000)
 parser.add_argument('--min-hp-length', type=int, required=False, default=4)
 parser.add_argument('--max-hp-length', type=int, required=False, default=9)
 parser.add_argument('--print-alignment', action='store_true')
@@ -298,9 +298,9 @@ parser.add_argument('--print-identity-per-segment', action='store_true')
 parser.add_argument('--write-edits', type=str, required=False)
 args = parser.parse_args()
 
-out_bam = "assembly_analysis.sorted.bam"
+out_bam = args.assembly + ".assembly_analysis.sorted.bam"
 with open(os.devnull, 'wb') as devnull:
-    mm2_cmd = "minimap2 -Y -a -x asm5 %s %s | samtools sort -T assembly_analysis.tmp -o %s -" % (args.reference, args.assembly, out_bam)
+    mm2_cmd = "minimap2 -Y -a -x asm5 %s %s | samtools sort -T %s.tmp -o %s -" % (args.reference, args.assembly, out_bam, out_bam)
     subprocess.check_call(mm2_cmd, stdout=devnull, stderr=devnull, shell=True)
 
     index_cmd = "samtools index %s" % (out_bam)
@@ -329,6 +329,9 @@ for read in samfile:
         if read.mapq < args.min_mapping_quality:
             continue
 
+        if read.query_alignment_length < args.min_alignment_length:
+            continue
+
         query_aligned, ref_aligned = make_aligned_strings(read, reference_file)
         reference_position = int(read.reference_start)
 
@@ -354,7 +357,7 @@ else:
 
     # build header and output stats
     header = ["assembly_name", "percent_identity", "qscore", "segment_median_qscore", "num_matches", "num_mismatches", "num_insertions", "num_deletions"]
-    stats = [args.assembly, "%.6f" % (100 * identity), "%.2f" % qscore(identity), qscore(median_identity),
+    stats = [args.assembly, "%.6f" % (100 * identity), "%.2f" % qscore(identity), "%.2f" % qscore(median_identity),
                                                                                   assembly_accuracy.get_matches(), 
                                                                                   assembly_accuracy.get_mismatches(), 
                                                                                   assembly_accuracy.get_insertions(),
@@ -364,8 +367,8 @@ else:
         header.append("%dmer_acc" % (i))
         stats.append("%.3f" % (assembly_accuracy.get_homopolymer_accuracy(i)))
 
-    print "\t".join(header)
-    print "\t".join([str(x) for x in stats])
+    print("\t".join(header))
+    print("\t".join([str(x) for x in stats]))
 
 # clean up temporary files
 os.remove(out_bam)
